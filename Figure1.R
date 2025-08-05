@@ -400,3 +400,127 @@ p <- Heatmap(TF_plot_matrix[TF_order$TF, ],
 
 draw(p)
 
+#Sup Figure 1d-----
+DEGs <- FindAllMarkers(eos_0.8, only.pos = TRUE)
+add_gene <- read.csv("cluster based add DEGs.csv")
+top10 <- DEGs %>% filter(!grepl("^mt-|^Rps|^Rpl|^ENS",gene), pct.1 > .3) %>% 
+  filter(p_val_adj < 0.05) %>% group_by(cluster) %>% 
+  slice_max(order_by = avg_log2FC, n = 10)
+
+gene_used <- union(unique(top10$gene),add_gene$gene)
+
+markers_mean_exp <- 
+  aggregate(
+    as.matrix(t(eos_0.8@assays$RNA@data[gene_used, ])),
+    list(Cluster = eos_0.8@meta.data[ ,"New_clusters"]),
+    mean)
+row.names(markers_mean_exp) <- markers_mean_exp$Cluster
+markers_mean_exp$Cluster <- c()
+
+## zscore
+zscore <- function(x){
+  return( (x - mean(x))/sd(x) )
+}
+
+markers_plot_matrix <- apply(markers_mean_exp, 2, zscore) %>% t()
+max.avg <- apply(markers_plot_matrix, 1, which.max)
+
+gene_order <- c()
+for(i in 1:ncol(markers_plot_matrix)){
+  if(sum(max.avg == i) > 1){
+    temp <- data.frame(
+      gene = names(sort(markers_plot_matrix[names(max.avg)[max.avg == i],i], decreasing = T)), 
+      cluster = colnames(markers_plot_matrix)[i], stringsAsFactors = F)
+  }else if(sum(max.avg == i) == 1){
+    temp <- data.frame(gene = names(max.avg)[max.avg == i], 
+                       cluster = colnames(markers_plot_matrix)[i])
+  }else{
+    temp <- c()
+  }
+  gene_order <- rbind(gene_order, temp)
+}
+gene_order <- gene_order[nrow(gene_order):1,]
+color_used <- circlize::colorRamp2(seq(min(markers_plot_matrix), 
+                                       max(markers_plot_matrix), 
+                                       length = 8), 
+                                   RColorBrewer::brewer.pal(9,'BuPu')[1:8])
+plotdata <- markers_plot_matrix[gene_order$gene, ]
+
+Heatmap(plotdata, cluster_rows = FALSE, cluster_columns = FALSE,
+        show_row_names = T, column_names_gp = gpar(fontsize = 10),
+        row_names_gp = gpar(fontsize = 6), col = color_used, name = "Exp")
+
+#Sup Figure 1e-----
+BP_result<-read.csv("BP_compareCluster_results.csv",row.names = 1)
+pathway<-read.csv("chosen BP pathway new.csv")
+pathway_used <- pathway %>%
+  pull(Description) %>%
+  unique()
+BubblePlot_df <- BP_result %>% 
+  filter(Description %in% pathway_used) %>%
+  dplyr::select(Cluster, Description, GeneRatio, p.adjust)
+
+BubblePlot_df$GeneRatio <- apply(str_split(BubblePlot_df$GeneRatio, "/", simplify = T), 2,as.numeric)
+BubblePlot_df$GeneRatio <- BubblePlot_df$GeneRatio[,1]/BubblePlot_df$GeneRatio[,2]
+
+Tissue_order <- c("BM","Blood","eWAT","BAT","scWAT","SI","Colon","Lung")
+BubblePlot_df$Cluster <- factor(BubblePlot_df$Cluster,levels = Tissue_order)
+
+pathway_order<-read.csv("Sup Figure 1e pathway_order.csv",row.names = 1)
+pathway_order<-pathway_order$x
+BubblePlot_df$Description <- factor(BubblePlot_df$Description,levels = pathway_order)
+color_used <- c("#E0ECF4FF","#BFD3E6FF","#9EBCDAFF","#8C96C6FF","#8C6BB1FF","#88419DFF", "#810F7CFF")
+ggplot(BubblePlot_df, aes(factor(Cluster),factor(Description))) +
+  geom_point(aes(size = GeneRatio, color = -log10(p.adjust)), show.legend = TRUE) +
+  scale_color_gradientn(colours = color_used,
+                        guide = guide_colorbar(reverse = F,order = 1))+
+  scale_size_continuous(range = c(3, 8)) +  
+  theme_minimal()+
+  labs(x = "", y = "")
+
+#Sup Figure 1f-----
+eos_0.8_filtered <- eos_0.8 %>% 
+  subset(Tissue %ni% c("BAT","scWAT","eWAT"))
+library(GEOquery)
+Bulk<-read.csv("GSE211112_RNAseq_SS2.EOS_tissues.filt_tpm.csv",row.names = 1)
+gseSet <- getGEO("GSE211112",destdir = '.',getGPL = F)
+gseSet <- gseSet[[1]]
+bulk_meta <- pData(gseSet)
+bulk_meta <- bulk_meta[c(1:24),c(1,8)]
+colnames(bulk_meta) <- c("Sample", "Tissue")
+bulk_meta <- bulk_meta[!bulk_meta$Tissue %in% c("Spleen","Skin"), ]
+bulk_meta <- bulk_meta %>%
+  mutate(across(2, ~case_when(
+    . == "Bone Marrow" ~ "BM",
+    . == "Small Intestine" ~ "SI",
+    TRUE ~ .
+  )))
+rownames(bulk_meta) <- NULL
+
+Bulk<-Bulk[ ,colnames(Bulk) %in% bulk_meta$Sample]
+Bulk <- log2(Bulk + 1)
+identical(colnames(Bulk),bulk_meta$Sample)
+
+campare_result <- Compare2Clusters(eos_0.8_filtered@assays$RNA@data, 
+                                   eos_0.8_filtered@meta.data$Tissue,
+                                   Bulk, bulk_meta$Tissue, ngenes = 1000,
+                                   name1 = "sc", name2 = "Bulk")
+
+library(ggdendro)
+dend_data <- ggdendro::dendro_data(campare_result$hc_fit$hclust, type = "rectangle")
+dend_data$labels$dataset <- stringr::str_split_fixed(dend_data$labels$label, "_", 2)[,1]
+ggplot() +
+  geom_segment(data = dend_data$segments,
+               aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_text(data = dend_data$labels,
+            aes(x = x, y = y - 0.05 * max(dend_data$segments$y), label = label, color = dataset),
+            angle = 90, hjust = 1, size = 3) +
+  scale_y_continuous(expand = c(1.2,0)) +
+  scale_x_continuous(expand = c(0,1.5)) +
+  scale_color_manual(values = c("bulk" = "#33583a", "sc" = "#72477d")) +
+  theme_nothing() +
+    coord_cartesian(ylim = c(min(dend_data$labels$y) - 0.1 * max(dend_data$segments$y),
+                           max(dend_data$segments$y))) +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
